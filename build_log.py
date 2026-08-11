@@ -5,7 +5,7 @@ build_log.py — turn an aibiller CSV into a billing spreadsheet (.xlsx)
 Reads aibiller_<project>[_<agent>].csv (written by aibiller.py) and emits an
 Excel workbook billed on AI processing time:
   - AI time        = duration_min (OS-clock pure run time, start → stop)
-  - billable hours = AI time rounded UP to a billing increment (default 15m)
+  - billable hours = AI time rounded UP to a billing increment (default 6m)
   - tokens         = in/out + total (total excludes cache_read)
 
   Note: aibiller measures one OS-clock interval per segment; it cannot separate
@@ -19,7 +19,7 @@ USAGE
 CONFIG
     AIBILLER_HOME             fallback data dir (default: ~/.aibiller)
     AIBILLER_PROJECT_DIR      project root → <dir>/<project>_AI_BILLER/ (see aibiller.py)
-    AIBILLER_BILLING_INCREMENT  billing round-up unit in hours (default: 0.25)
+    AIBILLER_BILLING_INCREMENT  billing round-up unit in hours (default: 0.1 = 6m)
     AIBILLER_LANG             Excel language: en (default) | zh (Traditional Chinese)
                               (or pass --lang zh)
 
@@ -56,11 +56,20 @@ def data_home(project=None):
         return Path(os.environ.get("AIBILLER_HOME", str(Path.home() / ".aibiller")))
 
 
+# Default billing increment: 0.1 h (6 minutes) — the tenth-of-an-hour unit
+# standard in legal billing. Coarser units (e.g. 0.25 h) round a 3-minute
+# segment up to 15 minutes, which overstates short segments materially.
+DEFAULT_BILLING_INCREMENT = 0.1
+
+
 def billing_increment():
     try:
-        return float(os.environ.get("AIBILLER_BILLING_INCREMENT", "0.25"))
+        inc = float(os.environ.get("AIBILLER_BILLING_INCREMENT",
+                                   str(DEFAULT_BILLING_INCREMENT)))
     except ValueError:
-        return 0.25
+        return DEFAULT_BILLING_INCREMENT
+    # A non-positive increment would make round_up divide by zero / loop.
+    return inc if inc > 0 else DEFAULT_BILLING_INCREMENT
 
 
 def lang(project=None):
@@ -146,7 +155,18 @@ def load_rows(project, agent):
 
 
 def round_up(hours, inc):
-    return math.ceil(hours / inc) * inc if hours > 0 else 0.0
+    """Round hours UP to the next whole increment.
+
+    The ratio is nudged by a tiny epsilon before ceil() so a segment landing
+    exactly on a boundary is not pushed to the next unit by float error: with
+    inc=0.1, 6.0 minutes is 0.09999999999999999/0.1 and would otherwise bill
+    as 0.2 h. The result is rounded to 3 dp because increments like 0.1 are
+    not exactly representable (0.1*3 = 0.30000000000000004) and would surface
+    in the spreadsheet as noise.
+    """
+    if hours <= 0:
+        return 0.0
+    return round(math.ceil(hours / inc - 1e-9) * inc, 3)
 
 
 def fnum(v, d=0.0):
