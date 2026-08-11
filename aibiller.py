@@ -317,13 +317,28 @@ def _collect_tokens_codex(start_epoch, stop_epoch):
 
 # ── commands ──────────────────────────────────────────────────────────────────
 def _parse_wall(hm):
-    """Parse 'HH:MM' into today's ISO + epoch (current tz)."""
+    """Parse 'HH:MM' into ISO + epoch (current tz).
+
+    Normally today. But a wall time later than *now* can only mean the user
+    asked before midnight and the segment ran past it (ask 23:50, stop 00:10),
+    so it rolls back a day. Without this, wall_start lands in the future and
+    wall_min is written to the CSV as a negative billable duration.
+    """
     t = now()
     try:
         h, m = (int(x) for x in hm.split(":"))
     except ValueError:
         return None
+    if not (0 <= h <= 23 and 0 <= m <= 59):
+        return None
     w = t.replace(hour=h, minute=m, second=0, microsecond=0)
+    if w > t:
+        w -= timedelta(days=1)
+        # A rollback only makes sense for a segment that genuinely crossed
+        # midnight (a few hours at most). Further back than that is far more
+        # likely a typo, and silently billing ~20h is the worse failure.
+        if (t - w).total_seconds() > 12 * 3600:
+            return None
     return w.isoformat(timespec="seconds"), w.timestamp()
 
 
@@ -408,6 +423,15 @@ def cmd_stop(project, note, agent="claude", make_excel=True):
         wall_min = (t_stop.timestamp()
                     - datetime.fromisoformat(wall_start_iso).timestamp()) / 60.0
     except ValueError:
+        wall_min = dur_min
+    if wall_min < dur_min:
+        # wall is the billable basis and always spans the AI segment, so it can
+        # never be shorter. If it is, the wall stamp is wrong (bad --wall, clock
+        # change) — fall back to the measured duration rather than silently
+        # writing an under-stated or negative number into a billing record.
+        print(f"⚠️ wall_min ({wall_min:.1f}m) < AI duration ({dur_min:.1f}m) — "
+              f"wall start looks wrong; recording duration instead.", file=sys.stderr)
+        wall_start_iso = open_seg["start_iso"]
         wall_min = dur_min
 
     HEADER = ["seq", "date", "wall_start_iso", "wall_end_iso", "wall_min",
